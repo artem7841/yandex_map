@@ -2,7 +2,9 @@ package com.artem.mapyandex
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.graphics.PointF
+import android.graphics.Typeface
 import android.os.Bundle
 import android.util.Log
 import android.widget.TextView
@@ -10,8 +12,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
+import androidx.core.content.res.ResourcesCompat
 import com.yandex.mapkit.MapKitFactory
 import com.yandex.mapkit.geometry.Point
 import com.yandex.mapkit.location.*
@@ -34,18 +35,9 @@ class MainActivity : AppCompatActivity() {
 
     // Для определения направления движения
     private var previousLocation: Location? = null
-
-    // Массив точек камер
-    private val cameraPoints = listOf(
-        Point(37.42259713926415, -122.0840224511963),
-        Point(37.42237432178187, -122.08558021116042),
-        Point(56.792995, 60.648634),
-        Point(56.791660, 60.651930),
-        Point(56.792593, 60.643717),
-    )
-
-    // Радиус обнаружения камеры (в метрах)
-    private val detectionRadius = 50.0
+    val dataClass = DataClass();
+    private val cameraPoints = dataClass.cameraPoints;
+    private val detectionRadius = dataClass.detectionRadius;
 
     // Флаг для отслеживания, была ли уже зафиксирована скорость на этой камере
     private val processedCameras = mutableSetOf<Point>()
@@ -66,17 +58,17 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        MapKitFactory.setApiKey("c181997f-ad9d-4251-bd60-dadfc4bcdbbc")
+        MapKitFactory.setApiKey(dataClass.apoKey)
         MapKitFactory.initialize(this)
 
         enableEdgeToEdge()
         setContentView(R.layout.activity_main)
 
         mapView = findViewById(R.id.mapview)
-        speedTextView = findViewById(R.id.speedTextView)
-        // Добавь этот TextView в layout для отображения предупреждений о камерах
-        cameraAlertTextView = findViewById(R.id.cameraAlertTextView)
+        mapView.getMap().isNightModeEnabled = true // night mode
 
+        speedTextView = findViewById(R.id.speedTextView)
+        cameraAlertTextView = findViewById(R.id.cameraAlertTextView)
         mapObjects = mapView.mapWindow.map.mapObjects.addCollection()
 
         // Добавляем метки камер на карту
@@ -103,11 +95,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupSpeedView() {
         speedTextView.apply {
-            setBackgroundResource(android.R.drawable.btn_default)
-            setTextColor(ContextCompat.getColor(this@MainActivity, android.R.color.black))
-            textSize = 20f
-            setPadding(40, 20, 40, 20)
+            setTextColor(Color.WHITE)
+            textSize = 40f
+            setPadding(24, 12, 24, 12)
             text = "0 км/ч"
+            background = null // Полностью прозрачный
+            setShadowLayer(6f, 0f, 0f, Color.BLACK) // Тень для читаемости
+            val typeface = ResourcesCompat.getFont(this@MainActivity, R.font.geologica)
+            setTypeface(typeface, Typeface.BOLD_ITALIC)
         }
     }
 
@@ -285,10 +280,12 @@ class MainActivity : AppCompatActivity() {
 
                 // Вычисляем направление движения
                 val azimuth = calculateAzimuth(location)
+                val cameraShift = calculateCameraShift(location.position, azimuth)
+
 
                 // Создаем позицию камеры как в навигаторе
                 val cameraPosition = CameraPosition(
-                    location.position, // позиция автомобиля
+                    cameraShift, // позиция автомобиля
                     17.0f,            // zoom (приближение)
                     azimuth,          // азимут (направление камеры)
                     60.0f             // наклон камеры (tilt) - как в навигаторах
@@ -311,6 +308,26 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+
+    private fun calculateCameraShift(carPosition: Point, azimuth: Float): Point {
+        // Смещение в градусах (экспериментируйте с этими значениями)
+        val offsetDistance = -0.003 // ~500 метров
+
+        // Вычисляем смещение на основе направления движения
+        val azimuthRad = Math.toRadians(azimuth.toDouble())
+
+        // Смещаем камеру "позади" автомобиля
+        val offsetLat = -offsetDistance * Math.cos(azimuthRad)
+        val offsetLon = -offsetDistance * Math.sin(azimuthRad)
+
+        return Point(
+            carPosition.latitude + offsetLat,
+            carPosition.longitude + offsetLon
+        )
+    }
+
+
+
     private fun updateSpeed(location: Location) {
         runOnUiThread {
             try {
@@ -326,17 +343,17 @@ class MainActivity : AppCompatActivity() {
                 speedTextView.text = speedText
 
                 // Меняем цвет в зависимости от скорости
-                when {
-                    speedKmh > 100 -> {
-                        speedTextView.setTextColor(ContextCompat.getColor(this, android.R.color.holo_red_dark))
-                    }
-                    speedKmh > 60 -> {
-                        speedTextView.setTextColor(ContextCompat.getColor(this, android.R.color.holo_orange_dark))
-                    }
-                    else -> {
-                        speedTextView.setTextColor(ContextCompat.getColor(this, android.R.color.black))
-                    }
-                }
+//                when {
+//                    speedKmh > 100 -> {
+//                        speedTextView.setTextColor(ContextCompat.getColor(this, android.R.color.holo_red_dark))
+//                    }
+//                    speedKmh > 60 -> {
+//                        speedTextView.setTextColor(ContextCompat.getColor(this, android.R.color.holo_orange_dark))
+//                    }
+//                    else -> {
+//                        speedTextView.setTextColor(ContextCompat.getColor(this, android.R.color.black))
+//                    }
+//                }
 
                 Log.d("SpeedDebug", "Speed: $speedKmh km/h")
 
