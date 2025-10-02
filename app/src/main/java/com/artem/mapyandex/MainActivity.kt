@@ -7,12 +7,14 @@ import android.graphics.PointF
 import android.graphics.Typeface
 import android.os.Bundle
 import android.util.Log
+import android.widget.Button
 import android.widget.TextView
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.res.ResourcesCompat
+import com.yandex.mapkit.Animation
 import com.yandex.mapkit.MapKitFactory
 import com.yandex.mapkit.geometry.Point
 import com.yandex.mapkit.location.*
@@ -28,10 +30,14 @@ import com.yandex.mapkit.map.RotationType
 class MainActivity : AppCompatActivity() {
     private lateinit var mapView: MapView
     private lateinit var speedTextView: TextView
+    private lateinit var plusButton: Button
+    private lateinit var minusButton: Button
     private var mapObjects: MapObjectCollection? = null
     private var userLocationPlacemark: PlacemarkMapObject? = null
     private var locationManager: LocationManager? = null
     private var locationListener: LocationListener? = null
+    // zoom
+    private var currentZoom = 19.0f
 
     // Для определения направления движения
     private var previousLocation: Location? = null
@@ -68,8 +74,21 @@ class MainActivity : AppCompatActivity() {
         mapView.getMap().isNightModeEnabled = true // night mode
 
         speedTextView = findViewById(R.id.speedTextView)
+        plusButton = findViewById(R.id.plus)
+        minusButton = findViewById(R.id.minus)
         cameraAlertTextView = findViewById(R.id.cameraAlertTextView)
         mapObjects = mapView.mapWindow.map.mapObjects.addCollection()
+
+        // Listeners on buttons
+        plusButton.setOnClickListener {
+            currentZoom+=0.5f
+            updateCameraZoom()
+        }
+
+        minusButton.setOnClickListener {
+            currentZoom-=0.5f
+            updateCameraZoom()
+        }
 
         // Добавляем метки камер на карту
         val cameraImageProvider = ImageProvider.fromResource(this, R.drawable.camera_point)
@@ -285,8 +304,8 @@ class MainActivity : AppCompatActivity() {
 
                 // Создаем позицию камеры как в навигаторе
                 val cameraPosition = CameraPosition(
-                    cameraShift, // позиция автомобиля
-                    17.0f,            // zoom (приближение)
+                    location.position, // позиция автомобиля
+                    currentZoom,            // zoom (приближение)
                     azimuth,          // азимут (направление камеры)
                     60.0f             // наклон камеры (tilt) - как в навигаторах
                 )
@@ -294,7 +313,7 @@ class MainActivity : AppCompatActivity() {
                 // Анимированное перемещение камеры
                 mapView.mapWindow.map.move(
                     cameraPosition,
-                    com.yandex.mapkit.Animation(com.yandex.mapkit.Animation.Type.SMOOTH, 1.0f),
+                    com.yandex.mapkit.Animation(com.yandex.mapkit.Animation.Type.SMOOTH, 0.3f),
                     null
                 )
 
@@ -306,6 +325,22 @@ class MainActivity : AppCompatActivity() {
                 Log.e("LocationDebug", "Error updating car location: ${e.message}")
             }
         }
+    }
+
+
+    private fun updateCameraZoom() {
+        val cameraPosition = CameraPosition(
+            mapView.map.cameraPosition.target, // текущая позиция
+            currentZoom,                       // новый зум
+            mapView.map.cameraPosition.azimuth,
+            mapView.map.cameraPosition.tilt
+        )
+
+        mapView.map.move(
+            cameraPosition,
+            Animation(Animation.Type.SMOOTH, 0.3f),
+            null
+        )
     }
 
 
