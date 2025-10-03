@@ -1,12 +1,14 @@
 package com.artem.mapyandex
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.PointF
 import android.graphics.Typeface
 import android.os.Bundle
 import android.util.Log
+import android.view.View
 import android.widget.Button
 import android.widget.TextView
 import androidx.activity.enableEdgeToEdge
@@ -51,6 +53,17 @@ class MainActivity : AppCompatActivity() {
     // TextView для отображения информации о камере
     private lateinit var cameraAlertTextView: TextView
 
+    private fun sendDataToCarApp(speed: Double, cameraAlert: String) {
+        // Отправляем данные в Android Auto версию
+        // Можно использовать SharedPreferences, сервис или Broadcast
+        val sharedPref = getSharedPreferences("car_data", Context.MODE_PRIVATE)
+        with(sharedPref.edit()) {
+            putInt("current_speed", speed.toInt())
+            putString("camera_alert", cameraAlert)
+            apply()
+        }
+    }
+
     private val locationPermissionRequest = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
@@ -64,8 +77,13 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        MapKitFactory.setApiKey(dataClass.apoKey)
-        MapKitFactory.initialize(this)
+        try {
+            MapKitFactory.setApiKey(dataClass.apoKey)
+            MapKitFactory.initialize(this)
+        } catch (e: Exception) {
+            Log.e("MapKitDebug", "Error initializing MapKit: ${e.message}")
+            // Продолжаем работу без MapKit если инициализация не удалась
+        }
 
         enableEdgeToEdge()
         setContentView(R.layout.activity_main)
@@ -143,7 +161,16 @@ class MainActivity : AppCompatActivity() {
                 Manifest.permission.ACCESS_FINE_LOCATION
             ) == PackageManager.PERMISSION_GRANTED
         ) {
-            startLocationUpdates()
+            // Сначала проверяем доступные провайдеры
+            checkLocationProviders()
+
+            // Пытаемся использовать MapKit LocationManager
+            try {
+                startLocationUpdates()
+            } catch (e: Exception) {
+                Log.e("LocationDebug", "MapKit location failed, using GPS directly: ${e.message}")
+                startGpsLocationUpdates()
+            }
         } else {
             locationPermissionRequest.launch(Manifest.permission.ACCESS_FINE_LOCATION)
         }
@@ -176,8 +203,79 @@ class MainActivity : AppCompatActivity() {
         )
 
         locationListener?.let { listener ->
-            locationManager?.subscribeForLocationUpdates(subscriptionSettings, listener)
+            try {
+                locationManager?.subscribeForLocationUpdates(subscriptionSettings, listener)
+            } catch (e: Exception) {
+                Log.e("LocationDebug", "Error with MapKit location, falling back to GPS: ${e.message}")
+                startGpsLocationUpdates()
+            }
         }
+    }
+
+    // Альтернативный метод через Android LocationManager
+    private fun startGpsLocationUpdates() {
+        try {
+            val locationManager = getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
+
+            // Проверяем доступность GPS провайдера
+            if (locationManager.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)) {
+                val locationListener = object : android.location.LocationListener {
+                    override fun onLocationChanged(location: android.location.Location) {
+                        // Конвертируем стандартную локацию в Yandex Location
+                        val yandexLocation = Location(
+                            Point(location.latitude, location.longitude), // position
+                            location.accuracy.toDouble(), // accuracy
+                            location.altitude, // altitude
+                            null, // altitudeAccuracy
+                            if (location.hasBearing()) location.bearing.toDouble() else null, // heading
+                            if (location.hasSpeed()) location.speed.toDouble() else null, // speed
+                            null, // indoorLevelId
+                            location.time, // absoluteTimestamp
+                            0L // relativeTimestamp
+                        )
+
+                        updateUserLocation(yandexLocation)
+                        updateSpeed(yandexLocation)
+                        checkCameraProximity(yandexLocation)
+                    }
+
+                    override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+                    override fun onProviderEnabled(provider: String) {}
+                    override fun onProviderDisabled(provider: String) {}
+                }
+
+                // Запрашиваем обновления только через GPS
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                    locationManager.requestLocationUpdates(
+                        android.location.LocationManager.GPS_PROVIDER,
+                        1000L, // 1 секунда
+                        1f,    // 1 метр
+                        locationListener
+                    )
+                    Log.d("LocationDebug", "GPS location updates started")
+                }
+            } else {
+                Log.w("LocationDebug", "GPS provider not available, using default location")
+                setDefaultLocation()
+            }
+        } catch (e: Exception) {
+            Log.e("LocationDebug", "Error starting GPS location: ${e.message}")
+            setDefaultLocation()
+        }
+    }
+
+    private fun checkLocationProviders() {
+        val locationManager = getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
+        val providers = locationManager.allProviders
+
+        Log.d("LocationDebug", "Available location providers: ${providers.joinToString()}")
+
+        // Проверяем конкретные провайдеры
+        val gpsEnabled = locationManager.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)
+        val networkEnabled = locationManager.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER)
+        val passiveEnabled = locationManager.isProviderEnabled(android.location.LocationManager.PASSIVE_PROVIDER)
+
+        Log.d("LocationDebug", "GPS: $gpsEnabled, Network: $networkEnabled, Passive: $passiveEnabled")
     }
 
     private fun checkCameraProximity(currentLocation: Location) {
@@ -272,6 +370,45 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun sendLocationToCarApp(location: Location) {
+        val sharedPref = getSharedPreferences("car_data", Context.MODE_PRIVATE)
+
+        // Рассчитываем ближайшую камеру
+        val nearestCameraInfo = calculateNearestCameraInfo(location.position)
+
+        with(sharedPref.edit()) {
+            putFloat("current_lat", location.position.latitude.toFloat())
+            putFloat("current_lon", location.position.longitude.toFloat())
+            putInt("current_speed", getCurrentSpeedKmh(location).toInt())
+            putString("nearest_camera", nearestCameraInfo)
+            apply()
+        }
+
+        Log.d("AutoDebug", "Data sent to Auto: ${location.position}, $nearestCameraInfo")
+    }
+
+    private fun calculateNearestCameraInfo(userPosition: Point): String {
+        var minDistance = Double.MAX_VALUE
+        var nearestCamera: Point? = null
+
+        for (cameraPoint in cameraPoints) {
+            val distance = calculateDistance(userPosition, cameraPoint)
+            if (distance < minDistance) {
+                minDistance = distance
+                nearestCamera = cameraPoint
+            }
+        }
+
+        return when {
+            minDistance < 50 -> "🚨 ОЧЕНЬ БЛИЗКО! ${minDistance.toInt()} м"
+            minDistance < 200 -> "⚠️ Близко ${minDistance.toInt()} м"
+            minDistance < 500 -> "📷 ${minDistance.toInt()} м впереди"
+            minDistance < 1000 -> "👀 Далеко ${minDistance.toInt()} м"
+            else -> "✅ Камер поблизости нет"
+        }
+    }
+
+
     private fun updateUserLocation(location: Location) {
         runOnUiThread {
             try {
@@ -318,6 +455,8 @@ class MainActivity : AppCompatActivity() {
                 )
 
                 previousLocation = location
+
+                sendLocationToCarApp(location)
 
                 Log.d("LocationDebug", "Camera positioned: azimuth=$azimuth, tilt=60.0")
 
@@ -391,6 +530,15 @@ class MainActivity : AppCompatActivity() {
 //                }
 
                 Log.d("SpeedDebug", "Speed: $speedKmh km/h")
+
+                // Отправляем данные в Android Auto
+                val alertText = if (cameraAlertTextView.visibility == View.VISIBLE) {
+                    cameraAlertTextView.text.toString()
+                } else {
+                    ""
+                }
+
+                sendDataToCarApp(speedKmh, alertText)
 
             } catch (e: Exception) {
                 Log.e("SpeedDebug", "Error updating speed: ${e.message}")
@@ -489,6 +637,15 @@ class MainActivity : AppCompatActivity() {
                 speedTextView.text = "0 км/ч"
 
                 Log.d("LocationDebug", "Default location set with navigation view")
+
+                val sharedPref = getSharedPreferences("car_data", Context.MODE_PRIVATE)
+                with(sharedPref.edit()) {
+                    putFloat("current_lat", defaultPoint.latitude.toFloat())
+                    putFloat("current_lon", defaultPoint.longitude.toFloat())
+                    putInt("current_speed", 0)
+                    putString("nearest_camera", "Режим по умолчанию")
+                    apply()
+                }
             } catch (e: Exception) {
                 Log.e("LocationDebug", "Error setting default location: ${e.message}")
             }
@@ -496,13 +653,25 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun stopLocationUpdates() {
+        // Останавливаем MapKit LocationManager
         locationListener?.let { listener ->
             locationManager?.unsubscribe(listener)
         }
         locationListener = null
         locationManager = null
-        Log.d("LocationDebug", "Location updates stopped")
+
+        // Также останавливаем стандартный LocationManager если используется
+        try {
+            val androidLocationManager = getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
+            androidLocationManager.removeUpdates { /* empty listener to remove all */ }
+        } catch (e: Exception) {
+            Log.e("LocationDebug", "Error stopping Android location updates: ${e.message}")
+        }
+
+        Log.d("LocationDebug", "All location updates stopped")
     }
+
+
 
     override fun onStart() {
         super.onStart()
