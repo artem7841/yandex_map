@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.PointF
 import android.graphics.Typeface
 import android.os.Bundle
+import android.os.Handler
 import android.util.Log
 import android.view.View
 import android.widget.Button
@@ -43,26 +44,15 @@ class MainActivity : AppCompatActivity() {
 
     // Для определения направления движения
     private var previousLocation: Location? = null
-    val dataClass = DataClass();
-    private val cameraPoints = dataClass.cameraPoints;
-    private val detectionRadius = dataClass.detectionRadius;
+    val dataClass = DataClass()
+    private val cameraPoints = dataClass.cameraPoints
+    private val detectionRadius = dataClass.detectionRadius
 
     // Флаг для отслеживания, была ли уже зафиксирована скорость на этой камере
     private val processedCameras = mutableSetOf<Point>()
 
     // TextView для отображения информации о камере
     private lateinit var cameraAlertTextView: TextView
-
-    private fun sendDataToCarApp(speed: Double, cameraAlert: String) {
-        // Отправляем данные в Android Auto версию
-        // Можно использовать SharedPreferences, сервис или Broadcast
-        val sharedPref = getSharedPreferences("car_data", Context.MODE_PRIVATE)
-        with(sharedPref.edit()) {
-            putInt("current_speed", speed.toInt())
-            putString("camera_alert", cameraAlert)
-            apply()
-        }
-    }
 
     private val locationPermissionRequest = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -77,57 +67,99 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // ВСЕГДА инициализируем MapKit - он нужен для карты на телефоне и в Auto
         try {
             MapKitFactory.setApiKey(dataClass.apoKey)
             MapKitFactory.initialize(this)
+            Log.d("MapKit", "✅ MapKit initialized for both phone and Auto")
         } catch (e: Exception) {
-            Log.e("MapKitDebug", "Error initializing MapKit: ${e.message}")
-            // Продолжаем работу без MapKit если инициализация не удалась
+            Log.e("MapKit", "❌ MapKit init error: ${e.message}")
         }
 
         enableEdgeToEdge()
         setContentView(R.layout.activity_main)
 
+        // Общая инициализация для обоих режимов
         mapView = findViewById(R.id.mapview)
-        mapView.getMap().isNightModeEnabled = true // night mode
+        mapView.map.isNightModeEnabled = true
 
         speedTextView = findViewById(R.id.speedTextView)
         plusButton = findViewById(R.id.plus)
         minusButton = findViewById(R.id.minus)
         cameraAlertTextView = findViewById(R.id.cameraAlertTextView)
-        mapObjects = mapView.mapWindow.map.mapObjects.addCollection()
 
-        // Listeners on buttons
-        plusButton.setOnClickListener {
-            currentZoom+=0.5f
-            updateCameraZoom()
-        }
-
-        minusButton.setOnClickListener {
-            currentZoom-=0.5f
-            updateCameraZoom()
-        }
-
-        // Добавляем метки камер на карту
-        val cameraImageProvider = ImageProvider.fromResource(this, R.drawable.camera_point)
-
-        cameraPoints.forEach { point ->
-            mapObjects?.addPlacemark().apply {
-                this?.geometry = point
-                this?.setIcon(cameraImageProvider)
-                // Настройка масштаба иконки
-                this?.setIconStyle(IconStyle().apply {
-                    scale = 0.1f
-                    anchor = PointF(0.5f, 1.0f)
-                })
-            }
-        }
-
-        // Настраиваем отображение скорости и предупреждений
         setupSpeedView()
         setupCameraAlertView()
 
+        // Добавляем метки камер на карту (работает и в Auto и на телефоне)
+        mapObjects = mapView.mapWindow.map.mapObjects.addCollection()
+        setupCameraMarkers()
+
+        // Инициализируем данные для Auto
+        initializeAutoData()
+
+        // Запускаем систему локации
         checkLocationPermission()
+
+        Handler().postDelayed({
+            forceSendTestData()
+        }, 3000)
+
+        Log.d("MainActivity", "🎯 App started - ready for phone and Auto")
+    }
+
+    private fun forceSendTestData() {
+        val testLocation = Location(
+            Point(56.838011, 60.597465), // Центр Екатеринбурга
+            15.0,
+            250.0,
+            null,
+            90.0,
+            0.0,
+            null,
+            System.currentTimeMillis(),
+            0L
+        )
+        sendEnhancedDataToCarApp(testLocation)
+        Log.d("Phone", "🔄 FORCED test data sent to Auto")
+    }
+
+    private fun setupCameraMarkers() {
+        try {
+            Log.d("CameraMarkers", "📍 Setting up camera markers on map")
+
+            val cameraImageProvider = ImageProvider.fromResource(this, R.drawable.camera_point)
+
+            cameraPoints.forEach { point ->
+                mapObjects?.addPlacemark()?.apply {
+                    geometry = point
+                    setIcon(cameraImageProvider)
+                    setIconStyle(IconStyle().apply {
+                        scale = 0.1f
+                        anchor = PointF(0.5f, 1.0f)
+                    })
+                }
+            }
+
+            Log.d("CameraMarkers", "✅ Added ${cameraPoints.size} camera markers to map")
+
+        } catch (e: Exception) {
+            Log.e("CameraMarkers", "❌ Error setting up camera markers: ${e.message}")
+        }
+    }
+
+    private fun initializeAutoData() {
+        val sharedPref = getSharedPreferences("car_data", Context.MODE_PRIVATE)
+        with(sharedPref.edit()) {
+            putFloat("current_lat", 0f)
+            putFloat("current_lon", 0f)
+            putInt("current_speed", 0)
+            putString("nearest_camera", "⏳ Ожидание данных...")
+            putString("camera_alert", "")
+            putLong("last_update_time", System.currentTimeMillis())
+            apply()
+        }
+        Log.d("AutoDebug", "Инициализированы начальные данные для Auto")
     }
 
     private fun setupSpeedView() {
@@ -151,7 +183,7 @@ class MainActivity : AppCompatActivity() {
             textSize = 16f
             setPadding(20, 10, 20, 10)
             text = ""
-            visibility = android.view.View.GONE
+            visibility = View.GONE
         }
     }
 
@@ -161,82 +193,288 @@ class MainActivity : AppCompatActivity() {
                 Manifest.permission.ACCESS_FINE_LOCATION
             ) == PackageManager.PERMISSION_GRANTED
         ) {
-            // Сначала проверяем доступные провайдеры
-            checkLocationProviders()
-
-            // Пытаемся использовать MapKit LocationManager
-            try {
-                startLocationUpdates()
-            } catch (e: Exception) {
-                Log.e("LocationDebug", "MapKit location failed, using GPS directly: ${e.message}")
-                startGpsLocationUpdates()
-            }
+            startLocationUpdates()
         } else {
             locationPermissionRequest.launch(Manifest.permission.ACCESS_FINE_LOCATION)
         }
     }
 
     private fun startLocationUpdates() {
-        locationManager = MapKitFactory.getInstance().createLocationManager()
+        val isAutomotive = packageManager.hasSystemFeature("android.hardware.type.automotive")
 
-        locationListener = object : LocationListener {
-            override fun onLocationUpdated(location: Location) {
-                Log.d("LocationDebug", "Location updated: ${location.position}")
-                updateUserLocation(location)
-                updateSpeed(location)
-                checkCameraProximity(location) // Проверяем приближение к камерам
-            }
+        if (isAutomotive) {
+            Log.d("LocationDebug", "🚗 ANDROID AUTO - Receiving location from phone")
+            // В Android Auto НЕ получаем локацию, а только слушаем данные из SharedPreferences
+            startLocationListeningFromPhone()
 
-            override fun onLocationStatusUpdated(status: LocationStatus) {
-                Log.d("LocationDebug", "Location status: $status")
-                when (status) {
-                    LocationStatus.AVAILABLE -> {}
-                    LocationStatus.NOT_AVAILABLE -> setDefaultLocation()
-                    LocationStatus.RESET -> {}
-                }
-            }
-        }
-
-        val subscriptionSettings = SubscriptionSettings(
-            UseInBackground.DISALLOW,
-            Purpose.AUTOMOTIVE_NAVIGATION
-        )
-
-        locationListener?.let { listener ->
-            try {
-                locationManager?.subscribeForLocationUpdates(subscriptionSettings, listener)
-            } catch (e: Exception) {
-                Log.e("LocationDebug", "Error with MapKit location, falling back to GPS: ${e.message}")
-                startGpsLocationUpdates()
-            }
+        } else {
+            Log.d("LocationDebug", "📱 PHONE MODE - Getting real location and sending to Auto")
+            // На телефоне получаем реальную локацию и отправляем в Auto
+            startMapKitLocation()
         }
     }
 
-    // Альтернативный метод через Android LocationManager
-    private fun startGpsLocationUpdates() {
+    private fun startSendingLocationToAuto() {
+        Log.d("AutoSync", "📤 Starting to send location to Android Auto")
+
+        val handler = android.os.Handler()
+        handler.postDelayed(object : Runnable {
+            override fun run() {
+                // Периодически проверяем и обновляем данные для Auto
+                val sharedPref = getSharedPreferences("car_data", Context.MODE_PRIVATE)
+
+                // Логируем статус
+                val lastUpdate = sharedPref.getLong("last_update_time", 0)
+                val dataAge = (System.currentTimeMillis() - lastUpdate) / 1000
+
+                Log.d("AutoSync", "📊 Auto sync status: data age = ${dataAge}sec")
+
+                handler.postDelayed(this, 2000) // Проверка каждые 2 секунды
+            }
+        }, 1000)
+    }
+
+    private fun startLocationListeningFromPhone() {
+        Log.d("AutoListen", "📥 Android Auto listening for phone location")
+
+        val handler = android.os.Handler()
+        handler.postDelayed(object : Runnable {
+            override fun run() {
+                val sharedPref = getSharedPreferences("car_data", Context.MODE_PRIVATE)
+
+                // Получаем данные от телефона
+                val lat = sharedPref.getFloat("current_lat", 0f)
+                val lon = sharedPref.getFloat("current_lon", 0f)
+                val speed = sharedPref.getInt("current_speed", 0)
+                val lastUpdate = sharedPref.getLong("last_update_time", 0)
+
+                val dataAge = (System.currentTimeMillis() - lastUpdate) / 1000
+
+                if (lat != 0f && lon != 0f) {
+                    Log.d("AutoListen", "📍 Received from phone: ${"%.6f".format(lat)}, ${"%.6f".format(lon)}, speed: $speed km/h, age: ${dataAge}sec")
+
+                    // Создаем Yandex Location из полученных данных
+                    val locationFromPhone = Location(
+                        Point(lat.toDouble(), lon.toDouble()),
+                        10.0, // accuracy
+                        0.0,  // altitude
+                        null,
+                        null, // heading
+                        (speed / 3.6), // speed (convert km/h to m/s)
+                        null,
+                        lastUpdate,
+                        0L
+                    )
+
+                    // ОБНОВЛЯЕМ КАРТУ В ANDROID AUTO!
+                    updateUserLocation(locationFromPhone)
+                    updateSpeed(locationFromPhone)
+
+                } else {
+                    Log.d("AutoListen", "⏳ Waiting for location data from phone...")
+                }
+
+                handler.postDelayed(this, 1000) // Проверка каждую секунду
+            }
+        }, 500)
+    }
+
+    private fun startCustomGpsInAuto() {
+        Log.d("AutoGPS", "🚀 Starting custom GPS for Android Auto")
+
         try {
             val locationManager = getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
 
-            // Проверяем доступность GPS провайдера
-            if (locationManager.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)) {
+            // Проверяем какие провайдеры доступны в Android Auto
+            val availableProviders = locationManager.allProviders
+            Log.d("AutoGPS", "📡 Available providers in Auto: ${availableProviders.joinToString()}")
+
+            // В Android Auto пробуем разные провайдеры по порядку
+            val provider = when {
+                locationManager.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER) -> {
+                    Log.d("AutoGPS", "✅ Using GPS_PROVIDER")
+                    android.location.LocationManager.GPS_PROVIDER
+                }
+                locationManager.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER) -> {
+                    Log.d("AutoGPS", "✅ Using NETWORK_PROVIDER")
+                    android.location.LocationManager.NETWORK_PROVIDER
+                }
+                locationManager.isProviderEnabled(android.location.LocationManager.PASSIVE_PROVIDER) -> {
+                    Log.d("AutoGPS", "✅ Using PASSIVE_PROVIDER")
+                    android.location.LocationManager.PASSIVE_PROVIDER
+                }
+                else -> {
+                    Log.w("AutoGPS", "❌ No location providers available, using simulation")
+                    null
+                }
+            }
+
+            if (provider != null && ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.ACCESS_FINE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED) {
+
+                // Создаем listener как отдельную переменную
                 val locationListener = object : android.location.LocationListener {
                     override fun onLocationChanged(location: android.location.Location) {
-                        // Конвертируем стандартную локацию в Yandex Location
+                        Log.d("AutoGPS", "📍 Real location received: ${location.latitude}, ${location.longitude}")
+
                         val yandexLocation = Location(
-                            Point(location.latitude, location.longitude), // position
-                            location.accuracy.toDouble(), // accuracy
-                            location.altitude, // altitude
-                            null, // altitudeAccuracy
-                            if (location.hasBearing()) location.bearing.toDouble() else null, // heading
-                            if (location.hasSpeed()) location.speed.toDouble() else null, // speed
-                            null, // indoorLevelId
-                            location.time, // absoluteTimestamp
-                            0L // relativeTimestamp
+                            Point(location.latitude, location.longitude),
+                            location.accuracy.toDouble(),
+                            location.altitude,
+                            null,
+                            if (location.hasBearing()) location.bearing.toDouble() else null,
+                            if (location.hasSpeed()) location.speed.toDouble() else null,
+                            null,
+                            location.time,
+                            0L
                         )
 
                         updateUserLocation(yandexLocation)
                         updateSpeed(yandexLocation)
                         checkCameraProximity(yandexLocation)
+                        sendEnhancedDataToCarApp(yandexLocation)
+                    }
+
+                    override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {
+                        Log.d("AutoGPS", "📊 Location status changed: $provider -> $status")
+                    }
+
+                    override fun onProviderEnabled(provider: String) {
+                        Log.d("AutoGPS", "✅ Provider enabled: $provider")
+                    }
+
+                    override fun onProviderDisabled(provider: String) {
+                        Log.d("AutoGPS", "❌ Provider disabled: $provider")
+                    }
+                }
+
+                // Запрашиваем обновления локации
+                locationManager.requestLocationUpdates(
+                    provider,
+                    1000L, // 1 секунда
+                    1f,    // 1 метр
+                    locationListener
+                )
+
+                Log.d("AutoGPS", "✅ Custom GPS started with provider: $provider")
+
+                // Пытаемся получить последнюю известную локацию
+                val lastLocation = locationManager.getLastKnownLocation(provider)
+                lastLocation?.let { location ->
+                    Log.d("AutoGPS", "📌 Using last known location: ${location.latitude}, ${location.longitude}")
+
+                    // Создаем Yandex Location из Android Location
+                    val yandexLocation = Location(
+                        Point(location.latitude, location.longitude),
+                        location.accuracy.toDouble(),
+                        location.altitude,
+                        null,
+                        if (location.hasBearing()) location.bearing.toDouble() else null,
+                        if (location.hasSpeed()) location.speed.toDouble() else null,
+                        null,
+                        location.time,
+                        0L
+                    )
+
+                    updateUserLocation(yandexLocation)
+                    updateSpeed(yandexLocation)
+                    checkCameraProximity(yandexLocation)
+                    sendEnhancedDataToCarApp(yandexLocation)
+                }
+
+            } else {
+                Log.w("AutoGPS", "🚨 No valid provider or permission, starting simulation")
+                // Fallback - запускаем плавную симуляцию
+                //startSmoothCircularSimulation()
+            }
+
+        } catch (e: SecurityException) {
+            Log.e("AutoGPS", "🔒 Permission denied: ${e.message}")
+            //startSmoothCircularSimulation()
+        } catch (e: Exception) {
+            Log.e("AutoGPS", "💥 Error starting custom GPS: ${e.message}")
+            //startSmoothCircularSimulation()
+        }
+    }
+
+    // Новый метод для синхронизации данных между приложением и Auto
+    private fun startDataSyncService() {
+        val handler = android.os.Handler()
+        handler.postDelayed(object : Runnable {
+            override fun run() {
+                // Периодически проверяем и отправляем актуальные данные в Auto
+                val sharedPref = getSharedPreferences("car_data", Context.MODE_PRIVATE)
+
+                // Логируем что отправляем
+                val lat = sharedPref.getFloat("current_lat", 0f)
+                val lon = sharedPref.getFloat("current_lon", 0f)
+                val speed = sharedPref.getInt("current_speed", 0)
+
+                Log.d("DataSync", "Синхронизация с Auto: lat=$lat, lon=$lon, speed=$speed")
+
+                handler.postDelayed(this, 2000) // Синхронизация каждые 2 секунды
+            }
+        }, 1000)
+    }
+
+    private fun sendEnhancedDataToCarApp(location: Location) {
+        val sharedPref = getSharedPreferences("car_data", Context.MODE_PRIVATE)
+
+        val nearestCameraInfo = calculateNearestCameraInfo(location.position)
+        val speedKmh = getCurrentSpeedKmh(location)
+        val alertText = if (cameraAlertTextView.visibility == View.VISIBLE) {
+            cameraAlertTextView.text.toString()
+        } else {
+            ""
+        }
+
+        with(sharedPref.edit()) {
+            putFloat("current_lat", location.position.latitude.toFloat())
+            putFloat("current_lon", location.position.longitude.toFloat())
+            putInt("current_speed", speedKmh.toInt())
+            putString("nearest_camera", nearestCameraInfo)
+            putString("camera_alert", alertText)
+            putLong("last_update_time", System.currentTimeMillis())
+            apply()
+        }
+
+        val isAutomotive = packageManager.hasSystemFeature("android.hardware.type.automotive")
+        if (!isAutomotive) {
+            Log.d("PhoneToAuto", "📤 PHONE → AUTO: " +
+                    "Lat: ${"%.6f".format(location.position.latitude)}, " +
+                    "Lon: ${"%.6f".format(location.position.longitude)}, " +
+                    "Speed: ${speedKmh.toInt()} km/h")
+        }
+    }
+
+    private fun forceRealGpsInEmulator() {
+        try {
+            val locationManager = getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
+
+            // Принудительно используем GPS провайдер
+            if (locationManager.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)) {
+                val locationListener = object : android.location.LocationListener {
+                    override fun onLocationChanged(location: android.location.Location) {
+                        Log.d("RealGPS", "Real location: ${location.latitude}, ${location.longitude}")
+
+                        val yandexLocation = Location(
+                            Point(location.latitude, location.longitude),
+                            location.accuracy.toDouble(),
+                            location.altitude,
+                            null,
+                            if (location.hasBearing()) location.bearing.toDouble() else null,
+                            if (location.hasSpeed()) location.speed.toDouble() else null,
+                            null,
+                            location.time,
+                            0L
+                        )
+
+                        updateUserLocation(yandexLocation)
+                        updateSpeed(yandexLocation)
+                        checkCameraProximity(yandexLocation)
+                        sendEnhancedDataToCarApp(yandexLocation)
                     }
 
                     override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
@@ -244,39 +482,151 @@ class MainActivity : AppCompatActivity() {
                     override fun onProviderDisabled(provider: String) {}
                 }
 
-                // Запрашиваем обновления только через GPS
                 if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
                     locationManager.requestLocationUpdates(
                         android.location.LocationManager.GPS_PROVIDER,
-                        1000L, // 1 секунда
-                        1f,    // 1 метр
+                        1000L,
+                        1f,
                         locationListener
                     )
-                    Log.d("LocationDebug", "GPS location updates started")
+                    Log.d("RealGPS", "Real GPS updates started")
                 }
-            } else {
-                Log.w("LocationDebug", "GPS provider not available, using default location")
-                setDefaultLocation()
             }
         } catch (e: Exception) {
-            Log.e("LocationDebug", "Error starting GPS location: ${e.message}")
-            setDefaultLocation()
+            Log.e("RealGPS", "Real GPS failed: ${e.message}")
         }
     }
 
-    private fun checkLocationProviders() {
-        val locationManager = getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
-        val providers = locationManager.allProviders
+    private fun startMapKitLocation() {
+        try {
+            locationManager = MapKitFactory.getInstance().createLocationManager()
 
-        Log.d("LocationDebug", "Available location providers: ${providers.joinToString()}")
+            locationListener = object : LocationListener {
+                override fun onLocationUpdated(location: Location) {
+                    Log.d("LocationDebug", "MapKit Location updated: ${location.position}")
+                    updateUserLocation(location)
+                    updateSpeed(location)
+                    checkCameraProximity(location)
+                    sendLocationToCarApp(location)
+                }
 
-        // Проверяем конкретные провайдеры
-        val gpsEnabled = locationManager.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)
-        val networkEnabled = locationManager.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER)
-        val passiveEnabled = locationManager.isProviderEnabled(android.location.LocationManager.PASSIVE_PROVIDER)
+                override fun onLocationStatusUpdated(status: LocationStatus) {
+                    Log.d("LocationDebug", "MapKit Location status: $status")
+                }
+            }
 
-        Log.d("LocationDebug", "GPS: $gpsEnabled, Network: $networkEnabled, Passive: $passiveEnabled")
+            val subscriptionSettings = SubscriptionSettings(
+                UseInBackground.DISALLOW,
+                Purpose.AUTOMOTIVE_NAVIGATION
+            )
+
+            locationListener?.let { listener ->
+                locationManager?.subscribeForLocationUpdates(subscriptionSettings, listener)
+            }
+
+        } catch (e: Exception) {
+            Log.e("LocationDebug", "MapKit location failed: ${e.message}")
+            //setupEmulatorLocation()
+        }
     }
+
+//    private fun setupEmulatorLocation() {
+//        Log.d("EmulatorDebug", "Setting up emulator location")
+//
+//        val basePoint = Point(56.791660, 60.651930)
+//
+//        val simulatedLocation = Location(
+//            basePoint,
+//            15.0,
+//            250.0,
+//            null,
+//            90.0,
+//            13.9,
+//            null,
+//            System.currentTimeMillis(),
+//            0L
+//        )
+//
+//        updateUserLocation(simulatedLocation)
+//        updateSpeed(simulatedLocation)
+//        sendLocationToCarApp(simulatedLocation)
+//
+//        Log.d("EmulatorDebug", "Emulator location set: $basePoint")
+//    }
+
+//    private fun startAutoDataSimulation() {
+//        val handler = android.os.Handler()
+//
+//        // Маршрут для плавного движения по Екатеринбургу
+//        val routePoints = listOf(
+//            Point(56.791660, 60.651930), // Начальная точка
+//            Point(56.792000, 60.652500),
+//            Point(56.792300, 60.653000),
+//            Point(56.792600, 60.653500),
+//            Point(56.792900, 60.654000),
+//            Point(56.793200, 60.654500),
+//            Point(56.793500, 60.655000),
+//            Point(56.793800, 60.655500),
+//            Point(56.794100, 60.656000)
+//        )
+//
+//        var currentPointIndex = 0
+//        var interpolationFactor = 0f
+//
+//        handler.postDelayed(object : Runnable {
+//            override fun run() {
+//                val isAutomotive = packageManager.hasSystemFeature("android.hardware.type.automotive")
+//                if (isAutomotive) {
+//                    // Плавная интерполяция между точками маршрута
+//                    val startPoint = routePoints[currentPointIndex]
+//                    val endPoint = routePoints[(currentPointIndex + 1) % routePoints.size]
+//
+//                    // Линейная интерполяция между точками
+//                    val currentLat = startPoint.latitude + (endPoint.latitude - startPoint.latitude) * interpolationFactor
+//                    val currentLon = startPoint.longitude + (endPoint.longitude - startPoint.longitude) * interpolationFactor
+//
+//                    // Плавное изменение скорости (50-60 км/ч)
+//                    val baseSpeed = 14.5 // ~52 км/ч
+//                    val speedVariation = Math.sin(interpolationFactor * Math.PI * 2) * 0.5 // ±0.5 м/с
+//                    val currentSpeed = baseSpeed + speedVariation
+//
+//                    // Плавное изменение направления
+//                    val deltaLat = endPoint.latitude - startPoint.latitude
+//                    val deltaLon = endPoint.longitude - startPoint.longitude
+//                    val currentHeading = Math.toDegrees(Math.atan2(deltaLon, deltaLat)).toFloat()
+//
+//                    val simulatedLocation = Location(
+//                        Point(currentLat, currentLon),
+//                        10.0, // accuracy
+//                        250.0, // altitude
+//                        null,
+//                        currentHeading.toDouble(), // heading
+//                        currentSpeed, // speed
+//                        null,
+//                        System.currentTimeMillis(),
+//                        0L
+//                    )
+//
+//                    updateUserLocation(simulatedLocation)
+//                    updateSpeed(simulatedLocation)
+//                    sendLocationToCarApp(simulatedLocation)
+//
+//                    // Увеличиваем интерполяцию
+//                    interpolationFactor += 0.05f // Плавное движение между точками
+//
+//                    // Если дошли до конца сегмента, переходим к следующему
+//                    if (interpolationFactor >= 1.0f) {
+//                        interpolationFactor = 0f
+//                        currentPointIndex = (currentPointIndex + 1) % routePoints.size
+//                        Log.d("AutoSimulation", "Переход к точке $currentPointIndex")
+//                    }
+//
+//                    Log.d("AutoSimulation", "Позиция: ${"%.6f".format(currentLat)}, ${"%.6f".format(currentLon)}")
+//                }
+//                handler.postDelayed(this, 500) // Обновление каждые 500мс - оптимально для плавности
+//            }
+//        }, 500)
+//    }
 
     private fun checkCameraProximity(currentLocation: Location) {
         runOnUiThread {
@@ -337,7 +687,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showCameraAlert(speedKmh: Double, distance: Double) {
-        cameraAlertTextView.visibility = android.view.View.VISIBLE
+        cameraAlertTextView.visibility = View.VISIBLE
         val speedText = String.format(Locale.getDefault(), "%.0f", speedKmh)
         val distanceText = String.format(Locale.getDefault(), "%.0f", distance)
 
@@ -358,14 +708,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun hideCameraAlert() {
-        cameraAlertTextView.visibility = android.view.View.GONE
+        cameraAlertTextView.visibility = View.GONE
     }
 
     private fun updateCameraDistanceInfo(distance: Double) {
-        // Можно добавить дополнительную информацию о расстоянии до ближайшей камеры
         if (distance < detectionRadius * 3) {
             val distanceText = String.format(Locale.getDefault(), "%.0f", distance)
-            // Можно обновлять другой TextView или добавлять информацию в существующий
             Log.d("CameraDebug", "Distance to nearest camera: $distance m")
         }
     }
@@ -389,13 +737,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun calculateNearestCameraInfo(userPosition: Point): String {
         var minDistance = Double.MAX_VALUE
-        var nearestCamera: Point? = null
 
         for (cameraPoint in cameraPoints) {
             val distance = calculateDistance(userPosition, cameraPoint)
             if (distance < minDistance) {
                 minDistance = distance
-                nearestCamera = cameraPoint
             }
         }
 
@@ -408,69 +754,103 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-
     private fun updateUserLocation(location: Location) {
         runOnUiThread {
             try {
-                if (mapObjects == null) {
-                    mapObjects = mapView.mapWindow.map.mapObjects.addCollection()
+                val isAutomotive = packageManager.hasSystemFeature("android.hardware.type.automotive")
+
+                if (isAutomotive) {
+                    // В ANDROID AUTO: добавляем метку текущей локации на карту
+                    Log.d("AutoMap", "📍 Adding user location to Auto map: ${location.position}")
+
+                    if (mapObjects == null && ::mapView.isInitialized) {
+                        mapObjects = mapView.mapWindow.map.mapObjects.addCollection()
+                    }
+
+                    // Удаляем предыдущую метку
+                    userLocationPlacemark?.let {
+                        mapObjects?.remove(it)
+                    }
+
+                    // Создаем новую метку для автомобиля СИНЕГО цвета
+                    userLocationPlacemark = mapObjects?.addPlacemark(location.position)
+                    userLocationPlacemark?.apply {
+                        isDraggable = false
+                        setIcon(ImageProvider.fromResource(this@MainActivity, R.drawable.icon_auto))
+                        setIconStyle(IconStyle().apply {
+                            anchor = PointF(0.5f, 1.0f)
+                            scale = 0.1f
+                            rotationType = RotationType.NO_ROTATION
+                            zIndex = 100.0f
+                        })
+                    }
+
+                    // Двигаем камеру к новой позиции
+                    val cameraPosition = CameraPosition(
+                        location.position,
+                        currentZoom,
+                        0.0f, // азимут
+                        60.0f // наклон
+                    )
+
+                    mapView.map.move(
+                        cameraPosition,
+                        Animation(Animation.Type.SMOOTH, 0.5f),
+                        null
+                    )
+
+                    Log.d("AutoMap", "✅ User location updated on Auto map")
+
+                } else {
+                    // НА ТЕЛЕФОНЕ: обычная логика (твоя существующая)
+                    if (mapObjects == null) {
+                        mapObjects = mapView.mapWindow.map.mapObjects.addCollection()
+                    }
+
+                    userLocationPlacemark?.let {
+                        mapObjects?.remove(it)
+                    }
+
+                    userLocationPlacemark = mapObjects?.addPlacemark(location.position)
+                    userLocationPlacemark?.apply {
+                        isDraggable = false
+                        setIcon(ImageProvider.fromResource(this@MainActivity, R.drawable.icon_auto))
+                        setIconStyle(IconStyle().apply {
+                            anchor = PointF(0.5f, 1.0f)
+                            scale = 0.1f
+                            rotationType = RotationType.NO_ROTATION
+                            zIndex = 100.0f
+                        })
+                    }
+
+                    val azimuth = calculateAzimuth(location)
+                    val cameraPosition = CameraPosition(
+                        location.position,
+                        currentZoom,
+                        azimuth,
+                        60.0f
+                    )
+
+                    mapView.map.move(
+                        cameraPosition,
+                        Animation(Animation.Type.SMOOTH, 0.3f),
+                        null
+                    )
                 }
-
-                // Удаляем предыдущую метку
-                userLocationPlacemark?.let {
-                    mapObjects?.remove(it)
-                }
-
-                // Создаем новую метку для автомобиля
-                userLocationPlacemark = mapObjects?.addPlacemark(location.position)
-                userLocationPlacemark?.apply {
-                    isDraggable = false
-                    setIcon(ImageProvider.fromResource(this@MainActivity, R.drawable.icon_auto))
-                    setIconStyle(IconStyle().apply {
-                        anchor = PointF(0.5f, 1.0f) // Центр иконки
-                        scale = 0.1f // Масштаб
-                        rotationType = RotationType.NO_ROTATION // Поворот по направлению
-                        zIndex = 100.0f // Поверх других объектов
-                    })
-                }
-
-                // Вычисляем направление движения
-                val azimuth = calculateAzimuth(location)
-                val cameraShift = calculateCameraShift(location.position, azimuth)
-
-
-                // Создаем позицию камеры как в навигаторе
-                val cameraPosition = CameraPosition(
-                    location.position, // позиция автомобиля
-                    currentZoom,            // zoom (приближение)
-                    azimuth,          // азимут (направление камеры)
-                    60.0f             // наклон камеры (tilt) - как в навигаторах
-                )
-
-                // Анимированное перемещение камеры
-                mapView.mapWindow.map.move(
-                    cameraPosition,
-                    com.yandex.mapkit.Animation(com.yandex.mapkit.Animation.Type.SMOOTH, 0.3f),
-                    null
-                )
 
                 previousLocation = location
-
-                sendLocationToCarApp(location)
-
-                Log.d("LocationDebug", "Camera positioned: azimuth=$azimuth, tilt=60.0")
+                sendEnhancedDataToCarApp(location)
 
             } catch (e: Exception) {
-                Log.e("LocationDebug", "Error updating car location: ${e.message}")
+                Log.e("LocationDebug", "❌ Error updating user location: ${e.message}")
             }
         }
     }
 
-
     private fun updateCameraZoom() {
         val cameraPosition = CameraPosition(
-            mapView.map.cameraPosition.target, // текущая позиция
-            currentZoom,                       // новый зум
+            mapView.map.cameraPosition.target,
+            currentZoom,
             mapView.map.cameraPosition.azimuth,
             mapView.map.cameraPosition.tilt
         )
@@ -481,26 +861,6 @@ class MainActivity : AppCompatActivity() {
             null
         )
     }
-
-
-    private fun calculateCameraShift(carPosition: Point, azimuth: Float): Point {
-        // Смещение в градусах (экспериментируйте с этими значениями)
-        val offsetDistance = -0.003 // ~500 метров
-
-        // Вычисляем смещение на основе направления движения
-        val azimuthRad = Math.toRadians(azimuth.toDouble())
-
-        // Смещаем камеру "позади" автомобиля
-        val offsetLat = -offsetDistance * Math.cos(azimuthRad)
-        val offsetLon = -offsetDistance * Math.sin(azimuthRad)
-
-        return Point(
-            carPosition.latitude + offsetLat,
-            carPosition.longitude + offsetLon
-        )
-    }
-
-
 
     private fun updateSpeed(location: Location) {
         runOnUiThread {
@@ -515,19 +875,6 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 speedTextView.text = speedText
-
-                // Меняем цвет в зависимости от скорости
-//                when {
-//                    speedKmh > 100 -> {
-//                        speedTextView.setTextColor(ContextCompat.getColor(this, android.R.color.holo_red_dark))
-//                    }
-//                    speedKmh > 60 -> {
-//                        speedTextView.setTextColor(ContextCompat.getColor(this, android.R.color.holo_orange_dark))
-//                    }
-//                    else -> {
-//                        speedTextView.setTextColor(ContextCompat.getColor(this, android.R.color.black))
-//                    }
-//                }
 
                 Log.d("SpeedDebug", "Speed: $speedKmh km/h")
 
@@ -546,13 +893,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun sendDataToCarApp(speed: Double, cameraAlert: String) {
+        val sharedPref = getSharedPreferences("car_data", Context.MODE_PRIVATE)
+        with(sharedPref.edit()) {
+            putInt("current_speed", speed.toInt())
+            putString("camera_alert", cameraAlert)
+            apply()
+        }
+    }
+
     private fun calculateSpeedFromMovement(currentLocation: Location): Double {
         previousLocation?.let { prev ->
-            val timeDiff = (currentLocation.absoluteTimestamp - prev.absoluteTimestamp) / 1000.0 // в секундах
+            val timeDiff = (currentLocation.absoluteTimestamp - prev.absoluteTimestamp) / 1000.0
             if (timeDiff > 0) {
                 val distance = calculateDistance(prev.position, currentLocation.position)
-                val speedMs = distance / timeDiff // м/с
-                return speedMs * 3.6 // км/ч
+                val speedMs = distance / timeDiff
+                return speedMs * 3.6
             }
         }
         return 0.0
@@ -586,7 +942,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun calculateDistance(point1: Point, point2: Point): Double {
-        val earthRadius = 6371000.0 // радиус Земли в метрах
+        val earthRadius = 6371000.0
 
         val lat1 = Math.toRadians(point1.latitude)
         val lon1 = Math.toRadians(point1.longitude)
@@ -626,12 +982,12 @@ class MainActivity : AppCompatActivity() {
                 // Позиция камеры по умолчанию с наклоном
                 val cameraPosition = CameraPosition(
                     defaultPoint,
-                    17.0f,   // zoom
-                    0.0f,    // азимут (север)
-                    60.0f    // наклон
+                    17.0f,
+                    0.0f,
+                    60.0f
                 )
 
-                mapView.mapWindow.map.move(cameraPosition)
+                mapView.map.move(cameraPosition)
 
                 // Устанавливаем скорость 0
                 speedTextView.text = "0 км/ч"
@@ -654,24 +1010,19 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopLocationUpdates() {
         // Останавливаем MapKit LocationManager
-        locationListener?.let { listener ->
-            locationManager?.unsubscribe(listener)
+        try {
+            locationListener?.let { listener ->
+                locationManager?.unsubscribe(listener)
+            }
+        } catch (e: Exception) {
+            Log.e("LocationDebug", "Error stopping MapKit location: ${e.message}")
         }
+
         locationListener = null
         locationManager = null
 
-        // Также останавливаем стандартный LocationManager если используется
-        try {
-            val androidLocationManager = getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
-            androidLocationManager.removeUpdates { /* empty listener to remove all */ }
-        } catch (e: Exception) {
-            Log.e("LocationDebug", "Error stopping Android location updates: ${e.message}")
-        }
-
-        Log.d("LocationDebug", "All location updates stopped")
+        Log.d("LocationDebug", "Location updates stopped")
     }
-
-
 
     override fun onStart() {
         super.onStart()

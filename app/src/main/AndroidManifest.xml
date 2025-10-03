@@ -36,6 +36,10 @@
                 <category android:name="androidx.car.app.category.NAVIGATION" />
             </intent-filter>
 
+<!--            <meta-data-->
+<!--                android:name="androidx.car.app.theme"-->
+<!--                android:resource="@style/CarAppTheme" />-->
+
         </service>
     </application>
 
